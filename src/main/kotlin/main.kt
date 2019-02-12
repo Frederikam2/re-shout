@@ -6,25 +6,20 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.time.Instant
+import java.time.temporal.ChronoField
+import java.time.temporal.TemporalAccessor
 import java.util.concurrent.TimeUnit
 
+data class DataPair(var audio: File, val meta: File)
 
 fun main() {
     val dir = File("tmp")
     dir.mkdir()
 
-    doStream(File("tmp/" + Instant.now().toString() + ".mp3"))
-    doStream(File("tmp/" + Instant.now().toString() + ".mp3"))
-
-    val meta = joinFiles(dir, "meta")
-    val mp3Joined = joinFiles(dir, "mp3")
-    val opus = File(dir, "final.opus")
-    encode(mp3Joined, opus)
-
-    println("Produced files $opus and $meta")
+    doStream(dir)
 }
 
-fun doStream(outFile: File) {
+fun doStream(tmpDir: File) {
     val client = HttpClient.newHttpClient()
     val request = HttpRequest.newBuilder()
         .uri(URI.create("http://live-icy.gss.dr.dk/A/A22H.mp3"))
@@ -32,29 +27,38 @@ fun doStream(outFile: File) {
         .build()
 
     var metadataInterval = 0
-    val future = client.sendAsync<InputStream>(request) {
+    val future = client.sendAsync(request) {
         metadataInterval = it.headers().firstValue("icy-metaint").get().toInt()
         HttpResponse.BodySubscribers.ofInputStream()
     }
     future.get(1, TimeUnit.MINUTES).body().use { inStream ->
-        FileOutputStream(outFile).use { outStream ->
-            FileOutputStream(outFile.path + ".meta").use {
-                handleIo(inStream, outStream, it, metadataInterval)
+        val now = Instant.now()
+        val key = "${now[ChronoField.YEAR]}-${now[ChronoField.DAY_OF_YEAR]}"
+        val pair = DataPair(tmpDir.resolve("$key.mp3"), tmpDir.resolve("$key.meta"))
+        println("Started streaming to ${pair.audio}")
+
+        val day = now[ChronoField.EPOCH_DAY]
+        val endTime = (day + 1) * TimeUnit.DAYS.toMillis(1)
+
+        FileOutputStream(pair.audio, true).use { outStream ->
+            FileOutputStream(pair.meta, true).use {
+                writeFiles(inStream, outStream, it, metadataInterval, endTime)
             }
         }
+
+        publishAsync(pair)
     }
 }
 
-fun handleIo(
+fun writeFiles(
     inputStream: InputStream,
     outputStream: OutputStream,
     metadataStream: OutputStream,
-    metaInterval: Int
+    metaInterval: Int,
+    endTime: Long
 ) {
-    var saved = 0
-    while (saved < 500_000) {
+    while (System.currentTimeMillis() < endTime) {
         val read = inputStream.readNBytes(metaInterval)
-        saved += read.size
         outputStream.write(read)
 
         var meta = String(inputStream.readNBytes(inputStream.read() * 16))
@@ -72,41 +76,4 @@ fun handleIo(
         metadataStream.write("$meta\n".toByteArray())
         println(meta)
     }
-}
-
-fun joinFiles(dir: File, extension: String): File {
-    val files = dir.listFiles().filter { it.extension == extension }
-        .sortedBy { it.lastModified() }
-
-    if (files.size == 1) return files[0]
-
-    val endFile = files[0]
-    FileOutputStream(endFile, true).use { out ->
-        files.drop(1).forEach {
-            FileInputStream(it).transferTo(out)
-        }
-    }
-
-    return endFile
-}
-
-fun encode(inF: File, outF: File) {
-    /*val concatList = dirF.listFiles()
-        .filter { it.extension == "mp3" }
-        .map { "file '${it.relativeTo(dirF).path}'\n" }
-        .reduce { acc, s -> acc + s }
-
-    FileOutputStream(File(dir, "concatlist")).use {
-        it.write(concatList.toByteArray())
-    }
-
-    ProcessBuilder("ffmpeg -y -f concat -safe 0 -i $dir/concatlist -c copy $dir/temp.mp3".split(" "))
-        .inheritIO()
-        .start()
-        .waitFor()*/
-
-    ProcessBuilder("ffmpeg -y -i ${inF.path} -b:a 48k ${outF.path}".split(" "))
-        .inheritIO()
-        .start()
-        .waitFor()
 }
